@@ -2,8 +2,11 @@ import json
 import uuid as uuid_lib
 import subprocess
 import os
+import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 class XrayManager:
     def __init__(self, config_path: str = "/usr/local/etc/xray/config.json"):
@@ -15,25 +18,122 @@ class XrayManager:
             if os.path.exists(self.config_path):
                 with open(self.config_path, 'r') as f:
                     return json.load(f)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
         return self.get_default_config()
-    
-    def save_config(self):
+
+    def check_service_status(self) -> Tuple[bool, str]:
+        """
+        Check if Xray service is running properly.
+        Returns (is_running, message)
+        """
         try:
+            result = subprocess.run(
+                ['systemctl', 'is-active', 'xray'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            status = result.stdout.strip()
+            if status == 'active':
+                return True, "Xray service is running"
+            else:
+                return False, f"Xray service status: {status}"
+        except subprocess.TimeoutExpired:
+            return False, "Timeout checking Xray service status"
+        except FileNotFoundError:
+            return False, "systemctl command not found"
+        except Exception as e:
+            return False, f"Error checking service: {str(e)}"
+
+    def check_config_accessibility(self) -> Tuple[bool, str]:
+        """
+        Check if Xray config file exists and is writable.
+        Returns (is_accessible, message)
+        """
+        try:
+            if not os.path.exists(self.config_path):
+                return False, f"Config file not found: {self.config_path}"
+
+            config_dir = os.path.dirname(self.config_path)
+            if not os.access(config_dir, os.W_OK):
+                return False, f"No write permission for config directory: {config_dir}"
+
+            if os.path.exists(self.config_path) and not os.access(self.config_path, os.W_OK):
+                return False, f"No write permission for config file: {self.config_path}"
+
+            return True, "Config file is accessible"
+        except Exception as e:
+            return False, f"Error checking config accessibility: {str(e)}"
+
+    def validate_protocol(self, protocol: str) -> bool:
+        """Validate if the protocol is supported."""
+        supported_protocols = ['vmess', 'vless', 'trojan']
+        return protocol.lower() in supported_protocols
+
+    def validate_connection_type(self, connection_type: str) -> bool:
+        """Validate if the connection type is supported."""
+        supported_types = ['ws', 'ws-tls', 'tcp', 'tcp-tls', 'ws-tls', 'ws-ssl']
+        return connection_type.lower().replace('_', '-') in supported_types
+    
+    def save_config(self) -> Tuple[bool, str]:
+        """
+        Save config and restart Xray service.
+        Returns (success, message)
+        """
+        try:
+            # Check if config file is writable before attempting to save
+            accessible, msg = self.check_config_accessibility()
+            if not accessible:
+                return False, msg
+
             with open(self.config_path, 'w') as f:
                 json.dump(self.config, f, indent=2)
-            self.restart_xray()
-            return True
+
+            restart_success, restart_msg = self.restart_xray()
+            if not restart_success:
+                return False, f"Config saved but restart failed: {restart_msg}"
+
+            return True, "Config saved and Xray restarted successfully"
+        except PermissionError as e:
+            logger.error(f"Permission error saving config: {e}")
+            return False, f"Permission denied: {str(e)}"
         except Exception as e:
-            print(f"Error saving config: {e}")
-            return False
-    
-    def restart_xray(self):
+            logger.error(f"Error saving config: {e}")
+            return False, f"Error saving config: {str(e)}"
+
+    def restart_xray(self) -> Tuple[bool, str]:
+        """
+        Restart Xray service and verify it's running.
+        Returns (success, message)
+        """
         try:
-            subprocess.run(['systemctl', 'restart', 'xray'], check=False)
-        except:
-            pass
+            result = subprocess.run(
+                ['systemctl', 'restart', 'xray'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode != 0:
+                return False, f"Restart command failed: {result.stderr}"
+
+            # Wait a moment and check if service is running
+            import time
+            time.sleep(2)
+
+            is_running, status_msg = self.check_service_status()
+            return is_running, status_msg
+
+        except subprocess.TimeoutExpired:
+            logger.error("Timeout restarting Xray service")
+            return False, "Timeout restarting Xray service"
+        except FileNotFoundError:
+            logger.error("systemctl command not found")
+            return False, "systemctl command not found"
+        except Exception as e:
+            logger.error(f"Error restarting Xray: {e}")
+            return False, f"Error restarting Xray: {str(e)}"
     
     def get_default_config(self) -> dict:
         return {
@@ -173,20 +273,45 @@ class XrayManager:
             ]
         }
     
-    def add_client(self, protocol: str, email: str, uuid: str = None, connection_type: str = "ws") -> Dict:
+    def add_client(self, protocol: str, email: str, uuid: str = None, connection_type: str = "ws") -> Tuple[Optional[Dict], Optional[str]]:
+        """
+        Add a new client to Xray configuration.
+        Returns (success_dict, error_message)
+        """
+        # Validate protocol
+        if not self.validate_protocol(protocol):
+            return None, f"Unsupported protocol: {protocol}"
+
+        # Validate connection type
+        if not self.validate_connection_type(connection_type):
+            return None, f"Unsupported connection type: {connection_type}"
+
+        # Check if Xray service is running
+        is_running, service_msg = self.check_service_status()
+        if not is_running:
+            return None, f"Xray service not running: {service_msg}"
+
+        # Check config accessibility
+        is_accessible, config_msg = self.check_config_accessibility()
+        if not is_accessible:
+            return None, f"Config file error: {config_msg}"
+
         if uuid is None:
             uuid = str(uuid_lib.uuid4())
-        
+
         inbound_tag = f"{protocol}-{connection_type}"
         if "tls" in connection_type or "ssl" in connection_type:
             inbound_tag += "-tls"
-        
+
+        # Find the appropriate inbound
+        inbound_found = False
         for inbound in self.config.get('inbounds', []):
-            if inbound.get('tag') == inbound_tag or inbound.get('protocol') == protocol:
+            if inbound.get('tag') == inbound_tag:
+                inbound_found = True
                 client = {
                     "email": email
                 }
-                
+
                 if protocol == "vmess":
                     client["id"] = uuid
                     client["alterId"] = 0
@@ -195,21 +320,33 @@ class XrayManager:
                     client["flow"] = ""
                 elif protocol == "trojan":
                     client["password"] = uuid
-                
+
                 if 'clients' not in inbound['settings']:
                     inbound['settings']['clients'] = []
-                
+
+                # Check for duplicate email
+                for existing_client in inbound['settings']['clients']:
+                    if existing_client.get('email') == email:
+                        return None, f"Client with email '{email}' already exists"
+
                 inbound['settings']['clients'].append(client)
-                self.save_config()
-                
+
+                # Save config and restart
+                save_success, save_msg = self.save_config()
+                if not save_success:
+                    return None, f"Failed to save config: {save_msg}"
+
                 return {
                     "uuid": uuid,
                     "email": email,
                     "protocol": protocol,
                     "connection_type": connection_type
                 }
-        
-        return None
+
+        if not inbound_found:
+            return None, f"Inbound tag '{inbound_tag}' not found in Xray configuration"
+
+        return None, "Failed to add client: Unknown error"
     
     def remove_client(self, email: str) -> bool:
         for inbound in self.config.get('inbounds', []):
@@ -217,8 +354,8 @@ class XrayManager:
             for i, client in enumerate(clients):
                 if client.get('email') == email:
                     clients.pop(i)
-                    self.save_config()
-                    return True
+                    save_success, _ = self.save_config()
+                    return save_success
         return False
     
     def get_client_info(self, email: str) -> Optional[Dict]:

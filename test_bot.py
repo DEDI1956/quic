@@ -60,7 +60,47 @@ class TestDatabase(unittest.TestCase):
 class TestXrayManager(unittest.TestCase):
     def setUp(self):
         self.xray = XrayManager()
-    
+
+    def test_validate_protocol_valid(self):
+        """Test valid protocols"""
+        self.assertTrue(self.xray.validate_protocol("vmess"))
+        self.assertTrue(self.xray.validate_protocol("vless"))
+        self.assertTrue(self.xray.validate_protocol("trojan"))
+
+    def test_validate_protocol_invalid(self):
+        """Test invalid protocols"""
+        self.assertFalse(self.xray.validate_protocol("invalid"))
+        self.assertFalse(self.xray.validate_protocol("shadowsocks"))
+        self.assertFalse(self.xray.validate_protocol(""))
+
+    def test_validate_connection_type_valid(self):
+        """Test valid connection types"""
+        self.assertTrue(self.xray.validate_connection_type("ws"))
+        self.assertTrue(self.xray.validate_connection_type("ws-tls"))
+        self.assertTrue(self.xray.validate_connection_type("ws_tls"))
+        self.assertTrue(self.xray.validate_connection_type("tcp"))
+        self.assertTrue(self.xray.validate_connection_type("tcp-tls"))
+
+    def test_validate_connection_type_invalid(self):
+        """Test invalid connection types"""
+        self.assertFalse(self.xray.validate_connection_type("invalid"))
+        self.assertFalse(self.xray.validate_connection_type(""))
+
+    def test_check_service_status(self):
+        """Test Xray service status check"""
+        is_running, msg = self.xray.check_service_status()
+        # The result depends on whether Xray is installed and running
+        # Just verify it returns a tuple with string message
+        self.assertIsInstance(is_running, bool)
+        self.assertIsInstance(msg, str)
+
+    def test_check_config_accessibility(self):
+        """Test config file accessibility check"""
+        is_accessible, msg = self.xray.check_config_accessibility()
+        # Just verify it returns a tuple with string message
+        self.assertIsInstance(is_accessible, bool)
+        self.assertIsInstance(msg, str)
+
     def test_generate_vmess_link(self):
         link = self.xray.generate_link(
             protocol="vmess",
@@ -70,7 +110,7 @@ class TestXrayManager(unittest.TestCase):
             domain="example.com"
         )
         self.assertTrue(link.startswith("vmess://"))
-    
+
     def test_generate_vless_link(self):
         link = self.xray.generate_link(
             protocol="vless",
@@ -80,7 +120,7 @@ class TestXrayManager(unittest.TestCase):
             domain="example.com"
         )
         self.assertTrue(link.startswith("vless://"))
-    
+
     def test_generate_trojan_link(self):
         link = self.xray.generate_link(
             protocol="trojan",

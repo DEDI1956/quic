@@ -507,9 +507,9 @@ async def process_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
     import uuid as uuid_lib
     uuid = str(uuid_lib.uuid4())
     email = f"{protocol}_{user_id}_{datetime.now().timestamp()}"
-    
-    result = xray.add_client(protocol, email, uuid, conn_type)
-    
+
+    result, error = xray.add_client(protocol, email, uuid, conn_type)
+
     if result:
         expired_at = datetime.now() + timedelta(days=days)
         
@@ -568,8 +568,10 @@ Gunakan tombol di bawah untuk mendapatkan QR Code.
             parse_mode='Markdown'
         )
     else:
+        error_msg = error or "Terjadi kesalahan tidak diketahui"
+        logger.error(f"Failed to create account for user {user_id}: {error_msg}")
         await query.message.edit_text(
-            "❌ Terjadi kesalahan saat membuat akun. Silakan hubungi admin.",
+            f"❌ Gagal membuat akun VPN.\n\nError: {error_msg}\n\nSilakan hubungi admin atau coba lagi nanti.",
             reply_markup=back_keyboard()
         )
     
@@ -720,14 +722,14 @@ Scan QR code ini dengan aplikasi VPN Anda.
 async def create_trial_account(update: Update, context: ContextTypes.DEFAULT_TYPE, protocol_conn: str):
     query = update.callback_query
     user_id = update.effective_user.id
-    
+
     db = get_db()
-    
+
     existing_trial = db.query(VPNAccount).filter(
         VPNAccount.telegram_id == user_id,
         VPNAccount.email.like('%trial%')
     ).first()
-    
+
     if existing_trial:
         await query.message.edit_text(
             "⚠️ Anda sudah pernah menggunakan trial!",
@@ -735,17 +737,40 @@ async def create_trial_account(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         db.close()
         return
-    
+
     parts = protocol_conn.split("_")
     protocol = parts[0]
     conn_type = "ws"
-    
+
+    # Pre-validate before creating account
+    # Check if Xray service is running
+    is_running, service_msg = xray.check_service_status()
+    if not is_running:
+        logger.error(f"Xray service check failed for trial creation: {service_msg}")
+        await query.message.edit_text(
+            "⚠️ Maaf, layanan VPN sedang maintenance.\n\nSilakan coba lagi dalam beberapa menit.",
+            reply_markup=back_keyboard()
+        )
+        db.close()
+        return
+
+    # Check config accessibility
+    is_accessible, config_msg = xray.check_config_accessibility()
+    if not is_accessible:
+        logger.error(f"Config accessibility check failed for trial creation: {config_msg}")
+        await query.message.edit_text(
+            "⚠️ Maaf, terjadi masalah konfigurasi.\n\nAdmin telah diberitahu. Silakan coba lagi nanti.",
+            reply_markup=back_keyboard()
+        )
+        db.close()
+        return
+
     import uuid as uuid_lib
     uuid = str(uuid_lib.uuid4())
     email = f"trial_{protocol}_{user_id}_{datetime.now().timestamp()}"
-    
-    result = xray.add_client(protocol, email, uuid, conn_type)
-    
+
+    result, error = xray.add_client(protocol, email, uuid, conn_type)
+
     if result:
         expired_at = datetime.now() + timedelta(hours=1)
         
@@ -792,11 +817,24 @@ Silakan gunakan tombol di bawah untuk QR code.
             parse_mode='Markdown'
         )
     else:
+        error_msg = error or "Terjadi kesalahan tidak diketahui"
+        logger.error(f"Failed to create trial account for user {user_id}: {error_msg}")
+
+        # Provide user-friendly error messages
+        if "not running" in error_msg.lower():
+            user_error = "❌ Layanan VPN sedang bermasalah.\n\nAdmin telah diberitahu. Silakan coba lagi nanti."
+        elif "permission" in error_msg.lower():
+            user_error = "❌ Terjadi masalah konfigurasi.\n\nAdmin telah diberitahu. Silakan hubungi admin."
+        elif "not found" in error_msg.lower():
+            user_error = "❌ Konfigurasi VPN tidak valid.\n\nHubungi admin untuk bantuan."
+        else:
+            user_error = f"❌ Gagal membuat akun trial.\n\nError: {error_msg}\n\nSilakan coba lagi nanti atau hubungi admin."
+
         await query.message.edit_text(
-            "❌ Terjadi kesalahan. Silakan coba lagi.",
+            user_error,
             reply_markup=back_keyboard()
         )
-    
+
     db.close()
 
 async def process_topup(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
