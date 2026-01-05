@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
+import json
 from datetime import datetime, timedelta
 from database import init_db, get_db, User, VPNAccount, Transaction
 from xray_manager import XrayManager
@@ -59,7 +60,40 @@ class TestDatabase(unittest.TestCase):
 
 class TestXrayManager(unittest.TestCase):
     def setUp(self):
-        self.xray = XrayManager()
+        self.test_config = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        json.dump(
+            {
+                "log": {"loglevel": "warning"},
+                "inbounds": [
+                    {
+                        "port": 10085,
+                        "protocol": "dokodemo-door",
+                        "tag": "api",
+                        "settings": {"address": "127.0.0.1"},
+                    },
+                    {
+                        "port": 8080,
+                        "protocol": "vmess",
+                        "tag": "vmess-ws",
+                        "settings": {"clients": []},
+                        "streamSettings": {
+                            "network": "ws",
+                            "security": "none",
+                            "wsSettings": {"path": "/vmess"},
+                        },
+                    },
+                ],
+                "outbounds": [{"protocol": "freedom", "tag": "direct"}],
+            },
+            self.test_config,
+        )
+        self.test_config.flush()
+        self.test_config.close()
+
+        self.xray = XrayManager(config_path=self.test_config.name, api_port=10085)
+
+    def tearDown(self):
+        os.unlink(self.test_config.name)
 
     def test_validate_protocol_valid(self):
         """Test valid protocols"""
