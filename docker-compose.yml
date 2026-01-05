@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  vpn-bot:
+    build: .
+    container_name: vpn-telegram-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./vpn_bot.db:/app/vpn_bot.db
+      - ./backups:/app/backups
+      - ./logs:/app/logs
+      - ./config.json:/app/config.json
+      - /etc/xray:/etc/xray
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+      - "8443:8443"
+      - "445:445"
+      - "8081:8081"
+    networks:
+      - vpn-network
+    depends_on:
+      - xray
+
+  xray:
+    image: teddysun/xray
+    container_name: xray-core
+    restart: always
+    volumes:
+      - /usr/local/etc/xray:/etc/xray
+      - /etc/xray:/etc/ssl/xray
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+      - "8443:8443"
+      - "445:445"
+      - "8081:8081"
+    networks:
+      - vpn-network
+
+networks:
+  vpn-network:
+    driver: bridge
