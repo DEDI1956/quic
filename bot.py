@@ -37,15 +37,68 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-with open('config.json', 'r') as f:
-    config = json.load(f)
+DEFAULT_CONFIG = {
+    "telegram": {
+        "bot_token": "",
+        "admin_ids": []
+    },
+    "xray": {
+        "api_port": 10085,
+        "config_path": "/usr/local/etc/xray/config.json"
+    },
+    "server": {
+        "domain": "",
+        "ip": ""
+    },
+    "pricing": {
+        "vmess_ws": 10000,
+        "vmess_ws_tls": 12000,
+        "vless_ws": 12000,
+        "vless_ws_tls": 15000,
+        "vless_tcp_tls": 18000,
+        "trojan_ws": 15000,
+        "trojan_ws_tls": 18000,
+        "trojan_tcp_tls": 20000
+    },
+    "trial": {
+        "enabled": True,
+        "duration_hours": 1
+    }
+}
 
-BOT_TOKEN = os.getenv('BOT_TOKEN', config['telegram']['bot_token'])
-ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '').split(',')] if os.getenv('ADMIN_IDS') else config['telegram']['admin_ids']
-SERVER_DOMAIN = os.getenv('SERVER_DOMAIN', config['server']['domain'])
-SERVER_IP = os.getenv('SERVER_IP', config['server']['ip'])
+CONFIG_PATH = os.getenv("BOT_CONFIG_PATH", "config.json")
+try:
+    with open(CONFIG_PATH, 'r') as f:
+        config = json.load(f)
+except FileNotFoundError:
+    logger.warning(f"Config file '{CONFIG_PATH}' not found. Using default config and environment variables.")
+    config = DEFAULT_CONFIG
+except json.JSONDecodeError as e:
+    logger.error(f"Invalid JSON in '{CONFIG_PATH}': {e}. Using default config.")
+    config = DEFAULT_CONFIG
 
-xray = XrayManager()
+BOT_TOKEN = os.getenv('BOT_TOKEN') or config.get('telegram', {}).get('bot_token', '')
+ADMIN_IDS = (
+    [int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip()]
+    if os.getenv('ADMIN_IDS')
+    else config.get('telegram', {}).get('admin_ids', [])
+)
+SERVER_DOMAIN = os.getenv('SERVER_DOMAIN') or config.get('server', {}).get('domain', '')
+SERVER_IP = os.getenv('SERVER_IP') or config.get('server', {}).get('ip', '')
+SERVER_HOST = SERVER_DOMAIN or SERVER_IP
+
+XRAY_CONFIG_PATH = os.getenv('XRAY_CONFIG_PATH') or config.get('xray', {}).get('config_path')
+XRAY_API_PORT = int(os.getenv('XRAY_API_PORT') or config.get('xray', {}).get('api_port', 10085))
+
+XRAY_INIT_ERROR = None
+
+try:
+    xray = XrayManager(config_path=XRAY_CONFIG_PATH or None, api_port=XRAY_API_PORT)
+    logger.info(f"XrayManager initialized: config_path={xray.config_path}, api_port={xray.api_port}")
+except Exception as e:
+    XRAY_INIT_ERROR = str(e)
+    logger.critical(f"FATAL: Failed to initialize XrayManager: {e}")
+    xray = None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -490,7 +543,20 @@ async def process_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
     db = get_db()
     user = db.query(User).filter(User.telegram_id == user_id).first()
     
-    pricing = config['pricing']
+    # Check if XrayManager is available
+    if xray is None:
+        logger.error("XrayManager not initialized - cannot process purchase")
+        error_detail = XRAY_INIT_ERROR or "XrayManager tidak terinisialisasi"
+        await query.message.edit_text(
+            "❌ Pembelian gagal karena layanan VPN belum siap.\n\n"
+            f"Detail: {error_detail}\n\n"
+            "Saldo Anda tidak dikurangi. Hubungi admin untuk bantuan.",
+            reply_markup=back_keyboard()
+        )
+        db.close()
+        return
+    
+    pricing = config.get('pricing', {})
     price_key = f"{protocol}_{conn_type}"
     base_price = pricing.get(price_key, 10000)
     price_multiplier = {7: 0.7, 15: 1.5, 30: 3, 60: 5}
@@ -537,7 +603,7 @@ async def process_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
         db.add(transaction)
         db.commit()
         
-        link = xray.generate_link(protocol, uuid, email, conn_type, SERVER_DOMAIN)
+        link = xray.generate_link(protocol, uuid, email, conn_type, SERVER_HOST)
         
         text = f"""
 ✅ **PEMBELIAN BERHASIL!**
@@ -639,12 +705,17 @@ async def send_account_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         db.close()
         return
     
+    if xray is None:
+        await query.answer("❌ Tidak bisa generate link: XrayManager tidak terinisialisasi", show_alert=True)
+        db.close()
+        return
+    
     link = xray.generate_link(
         account.protocol,
         account.uuid,
         account.email,
         account.connection_type,
-        SERVER_DOMAIN
+        SERVER_HOST
     )
     
     text = f"""
@@ -681,12 +752,17 @@ async def send_account_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
         db.close()
         return
     
+    if xray is None:
+        await query.answer("❌ Tidak bisa generate QR: XrayManager tidak terinisialisasi", show_alert=True)
+        db.close()
+        return
+    
     link = xray.generate_link(
         account.protocol,
         account.uuid,
         account.email,
         account.connection_type,
-        SERVER_DOMAIN
+        SERVER_HOST
     )
     
     qr = qrcode.QRCode(version=1, box_size=10, border=5)
@@ -725,6 +801,19 @@ async def create_trial_account(update: Update, context: ContextTypes.DEFAULT_TYP
 
     db = get_db()
 
+    # Check if XrayManager is initialized
+    if xray is None:
+        logger.error("XrayManager not initialized - cannot create trial account")
+        error_detail = XRAY_INIT_ERROR or "XrayManager tidak terinisialisasi"
+        await query.message.edit_text(
+            "❌ Layanan VPN belum siap karena konfigurasi server bermasalah.\n\n"
+            f"Detail: {error_detail}\n\n"
+            "Hubungi admin untuk bantuan.",
+            reply_markup=back_keyboard()
+        )
+        db.close()
+        return
+
     existing_trial = db.query(VPNAccount).filter(
         VPNAccount.telegram_id == user_id,
         VPNAccount.email.like('%trial%')
@@ -738,28 +827,30 @@ async def create_trial_account(update: Update, context: ContextTypes.DEFAULT_TYP
         db.close()
         return
 
-    parts = protocol_conn.split("_")
-    protocol = parts[0]
+    # Trial selalu dibuat di inbound yang paling umum dan non-TLS: vmess-ws
+    # (menghindari kegagalan jika server tidak menyediakan TLS/domain)
+    protocol = "vmess"
     conn_type = "ws"
 
-    # Pre-validate before creating account
-    # Check if Xray service is running
-    is_running, service_msg = xray.check_service_status()
-    if not is_running:
-        logger.error(f"Xray service check failed for trial creation: {service_msg}")
+    healthy, health_msg = xray.check_health()
+    if not healthy:
+        logger.error(f"Xray health check failed for trial creation: {health_msg}")
         await query.message.edit_text(
-            "⚠️ Maaf, layanan VPN sedang maintenance.\n\nSilakan coba lagi dalam beberapa menit.",
+            "❌ Trial gagal karena server VPN belum siap.\n\n"
+            f"Detail: {health_msg}\n\n"
+            "Silakan coba lagi nanti atau hubungi admin.",
             reply_markup=back_keyboard()
         )
         db.close()
         return
 
-    # Check config accessibility
     is_accessible, config_msg = xray.check_config_accessibility()
     if not is_accessible:
         logger.error(f"Config accessibility check failed for trial creation: {config_msg}")
         await query.message.edit_text(
-            "⚠️ Maaf, terjadi masalah konfigurasi.\n\nAdmin telah diberitahu. Silakan coba lagi nanti.",
+            "❌ Trial gagal karena bot tidak bisa menulis config Xray.\n\n"
+            f"Detail: {config_msg}\n\n"
+            "Hubungi admin untuk memperbaiki permission/konfigurasi.",
             reply_markup=back_keyboard()
         )
         db.close()
@@ -769,6 +860,7 @@ async def create_trial_account(update: Update, context: ContextTypes.DEFAULT_TYP
     uuid = str(uuid_lib.uuid4())
     email = f"trial_{protocol}_{user_id}_{datetime.now().timestamp()}"
 
+    logger.info(f"Creating trial account for user {user_id}: {protocol} {conn_type}")
     result, error = xray.add_client(protocol, email, uuid, conn_type)
 
     if result:
@@ -788,11 +880,11 @@ async def create_trial_account(update: Update, context: ContextTypes.DEFAULT_TYP
         
         db.add(new_account)
         db.commit()
-        
-        link = xray.generate_link(protocol, uuid, email, conn_type, SERVER_DOMAIN)
-        
+
+        link = xray.generate_link(protocol, uuid, email, conn_type, SERVER_HOST)
+
         text = f"""
-🎁 **TRIAL AKUN BERHASIL DIBUAT!**
+        🎁 **TRIAL AKUN BERHASIL DIBUAT!**
 
 Protokol: {protocol.upper()} WS
 Email: `{email}`
